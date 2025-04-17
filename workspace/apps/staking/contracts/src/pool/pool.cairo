@@ -537,6 +537,12 @@ pub mod Pool {
                 );
             // TODO: emit event.
         }
+
+        fn get_latest_cumulative_rewards_trace(self: @ContractState) -> Amount {
+            let (_, latest) = self.cumulative_rewards_trace.latest().unwrap();
+            return latest;
+        }
+
     }
 
     #[abi(embed_v0)]

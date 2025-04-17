@@ -74,6 +74,8 @@ pub trait IPool<TContractState> {
     fn update_rewards_from_staking_contract(
         ref self: TContractState, rewards: Amount, pool_balance: Amount,
     );
+
+    fn get_latest_cumulative_rewards_trace(self: @TContractState) -> Amount;
 }
 
 // **Note**: This trait must be reimplemented in the next version of the contract.
