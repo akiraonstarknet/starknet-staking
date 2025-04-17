@@ -2,13 +2,15 @@ use core::num::traits::Zero;
 use staking::constants::STRK_IN_FRIS;
 use staking::flow_test::flows;
 use staking::flow_test::utils::{
-    RewardSupplierTrait, StakingTrait, SystemConfigTrait, SystemDelegatorTrait, SystemStakerTrait,
-    SystemTrait, test_flow_local, test_flow_mainnet,
+    RewardSupplierTrait, StakingTrait, SystemConfigTrait, SystemDelegatorTrait, SystemFactoryTrait,
+    SystemReplaceabilityTrait, SystemStakerTrait, SystemTrait, test_flow_local, test_flow_mainnet,
 };
+use staking::staking::errors::Error;
 use staking::test_utils::StakingInitConfig;
+use starkware_utils::errors::Describable;
 use starkware_utils::math::abs::wide_abs_diff;
 use starkware_utils::types::time::time::Time;
-use starkware_utils_testing::test_utils::TokenTrait;
+use starkware_utils_testing::test_utils::{TokenTrait, assert_panic_with_error};
 
 #[test]
 fn basic_stake_flow_test() {
@@ -124,7 +126,7 @@ fn staker_info_after_upgrade_regression_test() {
 #[fork("MAINNET_LATEST")]
 fn staker_info_with_pool_after_upgrade_regression_test() {
     let mut flow = flows::StakerInfoWithPoolAfterUpgradeFlow {
-        staker: Option::None, staker_info: Option::None,
+        staker: Option::None, staker_info: Option::None, pool_address: Option::None,
     };
     test_flow_mainnet(ref :flow);
 }
@@ -133,7 +135,7 @@ fn staker_info_with_pool_after_upgrade_regression_test() {
 #[fork("MAINNET_LATEST")]
 fn staker_info_unstake_after_upgrade_regression_test() {
     let mut flow = flows::StakerInfoUnstakeAfterUpgradeFlow {
-        staker: Option::None, staker_info: Option::None,
+        staker: Option::None, staker_info: Option::None, pool_address: Option::None,
     };
     test_flow_mainnet(ref :flow);
 }
@@ -151,7 +153,7 @@ fn internal_staker_info_after_upgrade_regression_test() {
 #[fork("MAINNET_LATEST")]
 fn internal_staker_info_with_pool_after_upgrade_regression_test() {
     let mut flow = flows::InternalStakerInfoWithPoolAfterUpgradeFlow {
-        staker: Option::None, staker_info: Option::None,
+        staker: Option::None, staker_info: Option::None, pool_address: Option::None,
     };
     test_flow_mainnet(ref :flow);
 }
@@ -160,7 +162,7 @@ fn internal_staker_info_with_pool_after_upgrade_regression_test() {
 #[fork("MAINNET_LATEST")]
 fn internal_staker_info_unstake_after_upgrade_regression_test() {
     let mut flow = flows::InternalStakerInfoUnstakeAfterUpgradeFlow {
-        staker: Option::None, staker_info: Option::None,
+        staker: Option::None, staker_info: Option::None, pool_address: Option::None,
     };
     test_flow_mainnet(ref :flow);
 }
@@ -188,8 +190,8 @@ fn pool_claim_rewards_after_upgrade_regression_test() {
 
 #[test]
 #[fork("MAINNET_LATEST")]
-fn internal_pool_member_info_after_upgrade_regression_test() {
-    let mut flow = flows::InternalPoolMemberInfoAfterUpgradeFlow {
+fn pool_member_info_after_upgrade_regression_test() {
+    let mut flow = flows::PoolMemberInfoAfterUpgradeFlow {
         pool_address: Option::None, delegator: Option::None, delegator_info: Option::None,
     };
     test_flow_mainnet(ref :flow);
@@ -197,8 +199,8 @@ fn internal_pool_member_info_after_upgrade_regression_test() {
 
 #[test]
 #[fork("MAINNET_LATEST")]
-fn internal_pool_member_info_undelegate_after_upgrade_regression_test() {
-    let mut flow = flows::InternalPoolMemberInfoUndelegateAfterUpgradeFlow {
+fn pool_member_info_undelegate_after_upgrade_regression_test() {
+    let mut flow = flows::PoolMemberInfoUndelegateAfterUpgradeFlow {
         pool_address: Option::None, delegator: Option::None, delegator_info: Option::None,
     };
     test_flow_mainnet(ref :flow);
@@ -245,6 +247,25 @@ fn delegator_partial_intent_after_upgrade_regression_test() {
 fn increase_stake_after_upgrade_regression_test() {
     let mut flow = flows::IncreaseStakeAfterUpgradeFlow {
         staker: Option::None, stake_amount: Option::None, pool_address: Option::None,
+    };
+    test_flow_mainnet(ref :flow);
+}
+
+#[test]
+fn pool_claim_rewards_flow_test() {
+    let flow = flows::PoolClaimRewardsFlow {};
+    test_flow_local(:flow);
+}
+
+#[test]
+#[fork("MAINNET_LATEST")]
+fn pool_change_balance_after_upgrade_regression_test() {
+    let mut flow = flows::PoolChangeBalanceAfterUpgradeFlow {
+        pool_address: Option::None,
+        staker: Option::None,
+        delegator: Option::None,
+        delegator_info: Option::None,
+        delegated_amount: Zero::zero(),
     };
     test_flow_mainnet(ref :flow);
 }
@@ -332,11 +353,21 @@ fn delegator_switch_after_upgrade_regression_test() {
 
 #[test]
 #[fork("MAINNET_LATEST")]
-fn convert_internal_staker_info_regression_test() {
-    let mut flow = flows::ConvertInternalStakerInfoFlow {
-        staker: Option::None, staker_info: Option::None,
-    };
+fn staker_migration_regression_test() {
+    let mut flow = flows::StakerMigrationFlow { staker: Option::None, staker_info: Option::None };
     test_flow_mainnet(ref :flow);
+}
+
+#[test]
+fn claim_rewards_multiple_delegators_flow_test() {
+    let mut flow = flows::ClaimRewardsMultipleDelegatorsFlow {};
+    test_flow_local(:flow);
+}
+
+#[test]
+fn pool_claim_after_claim_flow_test() {
+    let flow = flows::PoolClaimAfterClaimFlow {};
+    test_flow_local(:flow);
 }
 
 #[test]
@@ -352,6 +383,125 @@ fn delegator_intent_before_claim_rewards_after_regression_test() {
         staker: Option::None, pool_address: Option::None, delegator: Option::None,
     };
     test_flow_mainnet(ref :flow);
+}
+
+#[test]
+#[fork("MAINNET_LATEST")]
+fn set_open_for_delegation_after_upgrade_flow_test() {
+    let mut flow = flows::SetOpenForDelegationAfterUpgradeFlow { staker: Option::None };
+    test_flow_mainnet(ref :flow);
+}
+
+#[test]
+fn increase_stake_intent_same_epoch_flow_test() {
+    let flow = flows::IncreaseStakeIntentSameEpochFlow {};
+    test_flow_local(:flow);
+}
+
+#[test]
+fn assert_total_stake_after_multi_stake_flow_test() {
+    let flow = flows::AssertTotalStakeAfterMultiStakeFlow {};
+    test_flow_local(:flow);
+}
+
+#[test]
+fn delegate_intent_same_epoch_flow_test() {
+    let flow = flows::DelegateIntentSameEpochFlow {};
+    test_flow_local(:flow);
+}
+
+#[test]
+#[fork("MAINNET_LATEST")]
+#[should_panic(expected: "Staker migration is not allowed, staker has a pool")]
+fn staker_migration_has_pool_flow_test() {
+    let mut flow = flows::StakerMigrationHasPoolFlow { staker_address: Option::None };
+    test_flow_mainnet(ref :flow);
+}
+
+#[test]
+fn two_stakers_same_operational_address_flow_test() {
+    let flow = flows::TwoStakersSameOperationalAddressFlow {};
+    test_flow_local(:flow);
+}
+
+#[test]
+#[fork("MAINNET_LATEST")]
+fn claim_rewards_with_non_upgraded_pool_flow_test() {
+    let mut flow = flows::ClaimRewardsWithNonUpgradedPoolFlow {
+        pool_address: Option::None,
+        first_delegator: Option::None,
+        first_delegator_info: Option::None,
+        second_delegator: Option::None,
+        second_delegator_info: Option::None,
+        third_delegator: Option::None,
+        third_delegator_info: Option::None,
+    };
+    test_flow_mainnet(ref :flow);
+}
+
+#[test]
+#[fork("MAINNET_LATEST")]
+fn delegator_action_with_non_upgraded_pool_regression_test() {
+    let mut flow = flows::DelegatorActionWithNonUpgradedPoolFlow {
+        staker: Option::None,
+        pool_address: Option::None,
+        first_delegator: Option::None,
+        first_delegator_info: Option::None,
+        second_delegator: Option::None,
+        second_delegator_info: Option::None,
+        third_delegator: Option::None,
+        third_delegator_info: Option::None,
+        initial_reward_supplier_balance: Option::None,
+    };
+    test_flow_mainnet(ref :flow);
+}
+
+#[test]
+#[fork("MAINNET_LATEST")]
+fn switch_with_non_upgraded_pool_regression_test() {
+    let mut flow = flows::SwitchWithNonUpgradedPoolFlow {
+        pool_address: Option::None,
+        first_delegator: Option::None,
+        second_delegator: Option::None,
+        stake_amount: Option::None,
+    };
+    test_flow_mainnet(ref :flow);
+}
+
+#[test]
+#[fork("MAINNET_LATEST")]
+fn delegator_exit_before_enter_after_regression_test() {
+    let mut flow = flows::DelegatorExitBeforeEnterAfterFlow {
+        pool_address: Option::None, delegator: Option::None,
+    };
+    test_flow_mainnet(ref :flow);
+}
+
+#[test]
+#[fork("MAINNET_LATEST")]
+fn delegator_intent_with_non_upgraded_pool_regression_test() {
+    let mut flow = flows::DelegatorIntentWithNonUpgradedPoolFlow {
+        pool_address: Option::None,
+        first_delegator: Option::None,
+        first_delegator_info: Option::None,
+        second_delegator: Option::None,
+        second_delegator_info: Option::None,
+        third_delegator: Option::None,
+        third_delegator_info: Option::None,
+    };
+    test_flow_mainnet(ref :flow);
+}
+
+#[test]
+fn add_to_delegation_after_exit_action_flow_test() {
+    let flow = flows::AddToDelegationAfterExitActionFlow {};
+    test_flow_local(:flow);
+}
+
+#[test]
+fn set_epoch_info_flow_test() {
+    let flow = flows::SetEpochInfoFlow {};
+    test_flow_local(:flow);
 }
 
 /// Flow:
@@ -968,6 +1118,52 @@ fn add_to_delegation_after_intent_flow_test() {
             + system.token.balance_of(account: staker.reward.address)
             + system.token.balance_of(account: delegator.reward.address)
             + system.token.balance_of(account: pool),
+    );
+}
+
+/// Flow:
+/// Staker stake
+/// Staker delegate
+/// Set pool for upgrade
+/// Deploy attestation
+/// Upgrade staking implementation
+/// Upgrade reward supplier implementation
+/// Pool migration
+#[test]
+#[fork("MAINNET_LATEST")]
+fn test_pool_migration() {
+    let mut system = SystemFactoryTrait::mainnet_system();
+
+    let min_stake = system.staking.get_min_stake();
+    let stake_amount = min_stake * 2;
+    let staker = system.new_staker(amount: stake_amount * 2);
+    system.stake(:staker, amount: stake_amount, pool_enabled: true, commission: 200);
+
+    let pool = system.staking.get_pool(:staker);
+    let delegator = system.new_delegator(amount: stake_amount);
+    system.delegate(:delegator, :pool, amount: stake_amount / 2);
+
+    let one_week = Time::weeks(count: 1);
+    system.advance_time(time: one_week);
+    system.staking.update_global_index_if_needed();
+
+    let staker_info = system.staker_info(:staker);
+    let pool_unclaimed_rewards = staker_info.pool_info.unwrap().unclaimed_rewards;
+
+    system.set_pool_for_upgrade(pool_address: pool);
+    system.deploy_attestation();
+    system.upgrade_staking_implementation();
+    system.upgrade_reward_supplier_implementation();
+
+    // Pool migration.
+    assert!(system.token.balance_of(account: pool).is_zero());
+    let staker_index_after_migration = system.staking.pool_migration(:staker, pool_address: pool);
+    assert!(staker_index_after_migration == staker_info.index);
+    assert!(system.token.balance_of(account: pool) == pool_unclaimed_rewards);
+
+    let result = system.staking.safe_pool_migration(:staker);
+    assert_panic_with_error(
+        :result, expected_error: Error::INTERNAL_STAKER_INFO_ALREADY_UPDATED.describe(),
     );
 }
 

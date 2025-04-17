@@ -1,7 +1,4 @@
-use core::num::traits::zero::Zero;
-use staking::pool::objects::InternalPoolMemberInfoV1;
-use staking::pool::pool_member_balance_trace::trace::PoolMemberCheckpointTrait;
-use staking::types::{Amount, Commission, Index, InternalPoolMemberInfoLatest};
+use staking::types::{Amount, Commission, InternalPoolMemberInfoLatest};
 use starknet::ContractAddress;
 use starkware_utils::types::time::time::Timestamp;
 
@@ -57,17 +54,17 @@ pub trait IPool<TContractState> {
     /// Change the `reward_address` for a pool member.
     fn change_reward_address(ref self: TContractState, reward_address: ContractAddress);
 
-    /// Return `PoolMemberInfo` of `pool_member`.
-    fn pool_member_info(self: @TContractState, pool_member: ContractAddress) -> PoolMemberInfo;
+    /// Return `PoolMemberInfoV1` of `pool_member`.
+    fn pool_member_info_v1(self: @TContractState, pool_member: ContractAddress) -> PoolMemberInfoV1;
 
-    /// Return `Option<PoolMemberInfo>` of `pool_member``
+    /// Return `Option<PoolMemberInfoV1>` of `pool_member`.
     /// without throwing an error or panicking.
-    fn get_pool_member_info(
+    fn get_pool_member_info_v1(
         self: @TContractState, pool_member: ContractAddress,
-    ) -> Option<PoolMemberInfo>;
+    ) -> Option<PoolMemberInfoV1>;
 
-    /// Return `PoolContractInfo` of the contract.
-    fn contract_parameters(self: @TContractState) -> PoolContractInfo;
+    /// Return `PoolContractInfoV1` of the contract.
+    fn contract_parameters_v1(self: @TContractState) -> PoolContractInfoV1;
 
     /// Update the cumulative sum in the pool trace with
     /// `rewards` divided by `pool_balance` for the current epoch.
@@ -167,13 +164,11 @@ pub mod Events {
 }
 
 #[derive(Drop, PartialEq, Serde, Copy, starknet::Store, Debug)]
-pub struct PoolMemberInfo {
+pub struct PoolMemberInfoV1 {
     /// Address to send the member's rewards to.
     pub reward_address: ContractAddress,
     /// The pool member's balance.
     pub amount: Amount,
-    /// Deprecated field previously used in rewards calculation.
-    pub index: Index,
     /// The amount of unclaimed rewards for the pool member.
     pub unclaimed_rewards: Amount,
     /// The commission the staker takes from the pool rewards.
@@ -186,30 +181,8 @@ pub struct PoolMemberInfo {
     pub unpool_time: Option<Timestamp>,
 }
 
-#[cfg(test)]
-#[generate_trait]
-pub(crate) impl PoolMemberInfoIntoInternalPoolMemberInfoV1Impl of PoolMemberInfoIntoInternalPoolMemberInfoV1Trait {
-    fn to_internal(self: PoolMemberInfo) -> InternalPoolMemberInfoV1 {
-        InternalPoolMemberInfoV1 {
-            reward_address: self.reward_address,
-            _deprecated_amount: self.amount,
-            _deprecated_index: self.index,
-            _unclaimed_rewards_from_v0: self.unclaimed_rewards,
-            _deprecated_commission: self.commission,
-            unpool_amount: self.unpool_amount,
-            unpool_time: self.unpool_time,
-            entry_to_claim_from: Zero::zero(),
-            reward_checkpoint: PoolMemberCheckpointTrait::new(
-                epoch: Zero::zero(),
-                balance: self.amount,
-                cumulative_rewards_trace_idx: Zero::zero(),
-            ),
-        }
-    }
-}
-
 #[derive(Copy, Debug, Drop, PartialEq, Serde)]
-pub struct PoolContractInfo {
+pub struct PoolContractInfoV1 {
     /// Address of the staker that owns the pool.
     pub staker_address: ContractAddress,
     /// Indicates whether the staker has been removed from the staking contract.

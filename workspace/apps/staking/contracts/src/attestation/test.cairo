@@ -84,7 +84,7 @@ fn test_attest_assertions() {
     );
     attestation_dispatcher.set_attestation_window(attestation_window: new_attestation_window);
 
-    // TODO: Catch ATTEST_EPOCH_ZERO - attest in epoch 0.
+    // TODO: Catch ATTEST_STARTING_EPOCH - attest in epoch 0.
     // advance epoch to make sure the staker has a balance.
     advance_epoch_global();
     // advance just before the attestation window.
@@ -169,7 +169,7 @@ fn test_is_attestation_done_in_curr_epoch() {
 }
 
 #[test]
-#[should_panic(expected: "Attestation for epoch 0 is not allowed")]
+#[should_panic(expected: "Attestation for starting epoch is not allowed")]
 fn test_is_attestation_done_in_curr_epoch_zero_epoch() {
     let mut cfg: StakingInitConfig = Default::default();
     general_contract_system_deployment(ref :cfg);
@@ -255,7 +255,7 @@ fn test_contract_upgrade_delay() {
 }
 
 #[test]
-fn test_validate_next_epoch_attestation_block() {
+fn test_get_current_epoch_target_attestation_block() {
     let mut cfg: StakingInitConfig = Default::default();
     general_contract_system_deployment(ref :cfg);
     let staking_contract = cfg.test_info.staking_contract;
@@ -268,35 +268,20 @@ fn test_validate_next_epoch_attestation_block() {
     // calculate the next planned attestation block number.
     let staking_dispatcher = IStakingDispatcher { contract_address: staking_contract };
     let epoch_info = staking_dispatcher.get_epoch_info();
-    let next_epoch_starting_block = epoch_info.current_epoch_starting_block()
-        + epoch_info.epoch_len_in_blocks().into();
-    let planned_attestation_block_number = next_epoch_starting_block
+    let planned_attestation_block_number = epoch_info.current_epoch_starting_block()
         + calculate_block_offset(
             stake: cfg.test_info.stake_amount.into(),
-            epoch_id: cfg.staking_contract_info.epoch_info.current_epoch().into() + 1,
+            epoch_id: cfg.staking_contract_info.epoch_info.current_epoch().into(),
             staker_address: cfg.test_info.staker_address.into(),
             epoch_len: cfg.staking_contract_info.epoch_info.epoch_len_in_blocks().into(),
             attestation_window: MIN_ATTESTATION_WINDOW,
         );
     let operational_address = cfg.staker_info.operational_address;
-    assert!(
-        attestation_dispatcher
-            .validate_next_epoch_attestation_block(
-                :operational_address, block_number: planned_attestation_block_number,
-            ),
-    );
-    assert!(
-        !attestation_dispatcher
-            .validate_next_epoch_attestation_block(
-                :operational_address, block_number: planned_attestation_block_number - 1,
-            ),
-    );
-    assert!(
-        !attestation_dispatcher
-            .validate_next_epoch_attestation_block(
-                :operational_address, block_number: planned_attestation_block_number + 1,
-            ),
-    );
+    let current_epoch_target_attestation_block = attestation_dispatcher
+        .get_current_epoch_target_attestation_block(:operational_address);
+    assert!(current_epoch_target_attestation_block == planned_attestation_block_number);
+    assert!(!(current_epoch_target_attestation_block == planned_attestation_block_number - 1));
+    assert!(!(current_epoch_target_attestation_block == planned_attestation_block_number + 1));
 }
 
 #[test]

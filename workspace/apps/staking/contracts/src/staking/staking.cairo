@@ -7,7 +7,9 @@ pub mod Staking {
     use openzeppelin::access::accesscontrol::AccessControlComponent;
     use openzeppelin::introspection::src5::SRC5Component;
     use openzeppelin::token::erc20::interface::{IERC20Dispatcher, IERC20DispatcherTrait};
-    use staking::constants::{DEFAULT_EXIT_WAIT_WINDOW, FIRST_VALID_EPOCH, MAX_EXIT_WAIT_WINDOW};
+    use staking::constants::{
+        DEFAULT_EXIT_WAIT_WINDOW, MAX_EXIT_WAIT_WINDOW, PREV_CONTRACT_VERSION, STARTING_EPOCH,
+    };
     use staking::errors::GenericError;
     use staking::pool::errors::Error as PoolError;
     use staking::pool::interface::{IPoolDispatcher, IPoolDispatcherTrait};
@@ -17,20 +19,23 @@ pub mod Staking {
     use staking::staking::errors::Error;
     use staking::staking::interface::{
         CommissionCommitment, ConfigEvents, Events, IStaking, IStakingAttestation, IStakingConfig,
-        IStakingMigration, IStakingPause, IStakingPool, PauseEvents, StakerInfo,
-        StakerPoolInfoTrait, StakingContractInfo,
+        IStakingMigration, IStakingPause, IStakingPool, PauseEvents, StakerInfoV1,
+        StakingContractInfoV1,
     };
     use staking::staking::objects::{
         AttestationInfo, AttestationInfoTrait, EpochInfo, EpochInfoTrait,
-        InternalStakerInfoConvertTrait, InternalStakerInfoLatestTrait, UndelegateIntentKey,
-        UndelegateIntentValue, UndelegateIntentValueTrait, UndelegateIntentValueZero,
-        VersionedInternalStakerInfo, VersionedInternalStakerInfoTrait,
+        InternalStakerInfoConvertTrait, InternalStakerInfoLatestTrait, InternalStakerInfoTrait,
+        UndelegateIntentKey, UndelegateIntentValue, UndelegateIntentValueTrait,
+        UndelegateIntentValueZero, VersionedInternalStakerInfo, VersionedInternalStakerInfoTrait,
     };
     use staking::staking::staker_balance_trace::trace::{
         MutableStakerBalanceTraceTrait, StakerBalance, StakerBalanceTrace, StakerBalanceTraceTrait,
         StakerBalanceTrait,
     };
-    use staking::types::{Amount, Commission, Epoch, Index, InternalStakerInfoLatest, Version};
+    use staking::types::{
+        Amount, Commission, Epoch, Index, InternalStakerInfoLatest, InternalStakerPoolInfoLatest,
+        Version,
+    };
     use staking::utils::{
         CheckedIERC20DispatcherTrait, compute_commission_amount_rounded_down,
         compute_new_delegated_stake, deploy_delegation_pool_contract,
@@ -47,7 +52,7 @@ pub mod Staking {
     use starkware_utils::trace::trace::{MutableTraceTrait, Trace, TraceTrait};
     use starkware_utils::types::time::time::{Time, TimeDelta, Timestamp};
     pub const CONTRACT_IDENTITY: felt252 = 'Staking Core Contract';
-    pub const CONTRACT_VERSION: felt252 = '1.0.0';
+    pub const CONTRACT_VERSION: felt252 = '2.0.0';
 
     pub const COMMISSION_DENOMINATOR: Commission = 10000;
 
@@ -174,10 +179,10 @@ pub mod Staking {
         self.pool_contract_admin.write(pool_contract_admin);
         self.exit_wait_window.write(DEFAULT_EXIT_WAIT_WINDOW);
         self.is_paused.write(false);
-        self.prev_class_hash.write(0, prev_class_hash);
+        self.prev_class_hash.write(PREV_CONTRACT_VERSION, prev_class_hash);
         self.epoch_info.write(epoch_info);
         self.attestation_contract.write(attestation_contract);
-        self.total_stake_trace.insert(key: FIRST_VALID_EPOCH, value: Zero::zero());
+        self.total_stake_trace.insert(key: STARTING_EPOCH, value: Zero::zero());
     }
 
     #[abi(embed_v0)]
@@ -233,7 +238,7 @@ pub mod Staking {
                         token_address: token_dispatcher.contract_address,
                         :commission,
                     );
-                Option::Some(StakerPoolInfoTrait::new(:pool_contract, :commission))
+                Option::Some(InternalStakerPoolInfoLatest { pool_contract, commission })
             } else {
                 Option::None
             };
@@ -457,35 +462,37 @@ pub mod Staking {
             // Update staker info and commit to storage.
             // No need to update rewards as there is no change in staked amount (own or delegated).
             staker_info
-                .pool_info = Option::Some(StakerPoolInfoTrait::new(:pool_contract, :commission));
+                .pool_info =
+                    Option::Some(InternalStakerPoolInfoLatest { pool_contract, commission });
             self.write_staker_info(:staker_address, :staker_info);
             pool_contract
         }
 
-        // This function provides the staker info (with projected rewards).
-        // If the staker does not exist, it panics.
-        fn staker_info(self: @ContractState, staker_address: ContractAddress) -> StakerInfo {
-            let mut internal_staker_info = self.internal_staker_info(:staker_address);
-            if let Option::Some(mut pool_info) = internal_staker_info.pool_info {
-                let pool_amount = self.get_balance(:staker_address).total_amount()
-                    - self.get_balance(:staker_address).amount_own();
-                pool_info._set_deprecated_amount(pool_amount);
-                internal_staker_info.pool_info = Option::Some(pool_info);
+        /// This function provides the staker info (with projected rewards).
+        /// If the staker does not exist, it panics.
+        /// This function assumes the staker trace is initialized.
+        fn staker_info_v1(self: @ContractState, staker_address: ContractAddress) -> StakerInfoV1 {
+            let internal_staker_info = self.internal_staker_info(:staker_address);
+            let staker_balance = self.get_balance(:staker_address);
+            let mut staker_info: StakerInfoV1 = internal_staker_info.into();
+            // Set staker amount and pool amount from staker balance trace.
+            staker_info.amount_own = staker_balance.amount_own();
+            if let Option::Some(mut pool_info) = staker_info.pool_info {
+                pool_info.amount = staker_balance.pool_amount();
+                staker_info.pool_info = Option::Some(pool_info);
             }
-            let mut staker_info: StakerInfo = internal_staker_info.into();
-            staker_info.amount_own = self.get_balance(:staker_address).amount_own();
             staker_info
         }
 
         // This function provides the staker info (with projected rewards) wrapped in an Option.
         // If the staker does not exist, it returns None.
-        fn get_staker_info(
+        fn get_staker_info_v1(
             self: @ContractState, staker_address: ContractAddress,
-        ) -> Option<StakerInfo> {
+        ) -> Option<StakerInfoV1> {
             if self.staker_info.read(staker_address).is_none() {
                 return Option::None;
             }
-            Option::Some(self.staker_info(:staker_address))
+            Option::Some(self.staker_info_v1(:staker_address))
         }
 
         fn get_current_epoch(self: @ContractState) -> Epoch {
@@ -497,8 +504,8 @@ pub mod Staking {
         }
 
 
-        fn contract_parameters(self: @ContractState) -> StakingContractInfo {
-            StakingContractInfo {
+        fn contract_parameters_v1(self: @ContractState) -> StakingContractInfoV1 {
+            StakingContractInfoV1 {
                 min_stake: self.min_stake.read(),
                 token_address: self.token_dispatcher.read().contract_address,
                 attestation_contract: self.attestation_contract.read(),
@@ -525,7 +532,7 @@ pub mod Staking {
             }
 
             let (epoch, total_stake) = total_stake_trace.penultimate().unwrap();
-            assert!(epoch <= current_epoch, "{}", Error::INVALID_PENULTIMATE);
+            assert!(epoch <= current_epoch, "{}", GenericError::INVALID_PENULTIMATE);
             total_stake
         }
 
@@ -591,6 +598,7 @@ pub mod Staking {
         fn update_commission(ref self: ContractState, commission: Commission) {
             // Prerequisites and asserts.
             self.general_prerequisites();
+            assert!(commission <= COMMISSION_DENOMINATOR, "{}", Error::COMMISSION_OUT_OF_RANGE);
             let staker_address = get_caller_address();
             let mut staker_info = self.internal_staker_info(:staker_address);
             assert!(staker_info.unstake_time.is_none(), "{}", Error::UNSTAKE_IN_PROGRESS);
@@ -643,6 +651,7 @@ pub mod Staking {
             ref self: ContractState, max_commission: Commission, expiration_epoch: Epoch,
         ) {
             self.general_prerequisites();
+            assert!(max_commission <= COMMISSION_DENOMINATOR, "{}", Error::COMMISSION_OUT_OF_RANGE);
             let staker_address = get_caller_address();
             let mut staker_info = self.internal_staker_info(:staker_address);
             assert!(staker_info.unstake_time.is_none(), "{}", Error::UNSTAKE_IN_PROGRESS);
@@ -704,30 +713,25 @@ pub mod Staking {
                 VersionedInternalStakerInfo::V1(internal_staker_info_v1) => internal_staker_info_v1,
             }
         }
-        fn convert_internal_staker_info(
-            ref self: ContractState, staker_address: ContractAddress,
-        ) -> InternalStakerInfoLatest {
+
+        fn staker_migration(ref self: ContractState, staker_address: ContractAddress) {
             let versioned_internal_staker_info = self.staker_info.read(staker_address);
             match versioned_internal_staker_info {
                 VersionedInternalStakerInfo::None => panic_with_byte_array(
                     err: @GenericError::STAKER_NOT_EXISTS.describe(),
                 ),
                 VersionedInternalStakerInfo::V0(internal_staker_info_v0) => {
-                    let (internal_staker_info_v1, amount_own) = internal_staker_info_v0
-                        .convert(self.get_prev_class_hash(), staker_address);
-                    self
-                        .staker_info
-                        .write(
-                            staker_address,
-                            VersionedInternalStakerInfo::V1(internal_staker_info_v1),
-                        );
-                    self.initialize_staker_balance_trace(:staker_address, :amount_own);
-                    internal_staker_info_v1
+                    if let Option::Some(_) = internal_staker_info_v0.pool_info() {
+                        panic_with_byte_array(
+                            err: @Error::STAKER_MIGRATION_NOT_ALLOWED_WITH_POOL.describe(),
+                        )
+                    }
+                    self.convert_internal_staker_info(:staker_address)
                 },
                 VersionedInternalStakerInfo::V1(_) => panic_with_byte_array(
                     err: @Error::INTERNAL_STAKER_INFO_ALREADY_UPDATED.describe(),
                 ),
-            }
+            };
         }
     }
 
@@ -962,22 +966,20 @@ pub mod Staking {
         fn pool_migration(ref self: ContractState, staker_address: ContractAddress) -> Index {
             // Prerequisites and asserts.
             self.assert_caller_is_not_zero();
-            let mut staker_info = self.convert_internal_staker_info(:staker_address);
+            let (staker_info, staker_index, pool_unclaimed_rewards) = self
+                .convert_internal_staker_info(:staker_address);
             let pool_address = staker_info.get_pool_info().pool_contract;
             assert!(get_caller_address() == pool_address, "{}", Error::CALLER_IS_NOT_POOL_CONTRACT);
 
             // Send rewards to pool contract, and commit to storage.
-            // Note: `_deprecated_send_rewards_to_delegation_pool_V0` alters `staker_info` thus
-            // commit to storage is performed only after that.
-            let updated_index = staker_info._deprecated_index_V0;
             let token_dispatcher = self.token_dispatcher.read();
             self
                 ._deprecated_send_rewards_to_delegation_pool_V0(
-                    :staker_address, ref :staker_info, :token_dispatcher,
+                    :staker_address, :staker_info, :pool_unclaimed_rewards, :token_dispatcher,
                 );
             self.write_staker_info(:staker_address, :staker_info);
 
-            updated_index
+            staker_index
         }
     }
 
@@ -1112,12 +1114,55 @@ pub mod Staking {
         ///
         /// **Note**: This function must be reimplemented in the next version of the contract.
         fn get_prev_class_hash(self: @ContractState) -> ClassHash {
-            self.prev_class_hash.read(0)
+            self.prev_class_hash.read(PREV_CONTRACT_VERSION)
         }
     }
 
     #[generate_trait]
     pub(crate) impl InternalStakingFunctions of InternalStakingFunctionsTrait {
+        /// Reads the internal staker information for the given `staker_address` from storage
+        /// and converts it to V1. Writes the updated version to storage and initializes the
+        /// staker's balance trace.
+        ///
+        /// Precondition: The staker exists and its version is V0.
+        ///
+        /// This function is used only during migration.
+        fn convert_internal_staker_info(
+            ref self: ContractState, staker_address: ContractAddress,
+        ) -> (InternalStakerInfoLatest, Index, Amount) {
+            let versioned_internal_staker_info = self.staker_info.read(staker_address);
+            match versioned_internal_staker_info {
+                VersionedInternalStakerInfo::None => panic_with_byte_array(
+                    err: @GenericError::STAKER_NOT_EXISTS.describe(),
+                ),
+                VersionedInternalStakerInfo::V0(internal_staker_info_v0) => {
+                    let (
+                        internal_staker_info_v1,
+                        amount_own,
+                        index,
+                        pool_unclaimed_rewards,
+                        pool_amount,
+                    ) =
+                        internal_staker_info_v0
+                        .convert(self.get_prev_class_hash(), staker_address);
+                    self
+                        .staker_info
+                        .write(
+                            staker_address,
+                            VersionedInternalStakerInfo::V1(internal_staker_info_v1),
+                        );
+                    self
+                        .initialize_staker_balance_trace(
+                            :staker_address, :amount_own, :pool_amount,
+                        );
+                    (internal_staker_info_v1, index, pool_unclaimed_rewards)
+                },
+                VersionedInternalStakerInfo::V1(_) => panic_with_byte_array(
+                    err: @Error::INTERNAL_STAKER_INFO_ALREADY_UPDATED.describe(),
+                ),
+            }
+        }
+
         fn send_rewards(
             self: @ContractState,
             reward_address: ContractAddress,
@@ -1160,16 +1205,15 @@ pub mod Staking {
         fn _deprecated_send_rewards_to_delegation_pool_V0(
             ref self: ContractState,
             staker_address: ContractAddress,
-            ref staker_info: InternalStakerInfoLatest,
+            staker_info: InternalStakerInfoLatest,
+            pool_unclaimed_rewards: Amount,
             token_dispatcher: IERC20Dispatcher,
         ) {
-            let mut pool_info = staker_info.get_pool_info();
+            let pool_info = staker_info.get_pool_info();
             let pool_address = pool_info.pool_contract;
-            let amount = pool_info._deprecated_unclaimed_rewards();
+            let amount = pool_unclaimed_rewards;
 
             self.send_rewards(reward_address: pool_address, :amount, :token_dispatcher);
-            pool_info._set_deprecated_unclaimed_rewards(unclaimed_rewards: Zero::zero());
-            staker_info.pool_info = Option::Some(pool_info);
 
             self
                 .emit(
@@ -1465,18 +1509,20 @@ pub mod Staking {
 
         /// **Note**: This function should be called only once during migration.
         fn initialize_staker_balance_trace(
-            ref self: ContractState, staker_address: ContractAddress, amount_own: Amount,
+            ref self: ContractState,
+            staker_address: ContractAddress,
+            amount_own: Amount,
+            pool_amount: Amount,
         ) -> StakerBalance {
             let staker_info = self.internal_staker_info(:staker_address);
             let mut staker_balance = StakerBalanceTrait::new(:amount_own);
-            if let Option::Some(pool_info) = staker_info.pool_info {
-                let pool_amount = pool_info._deprecated_amount();
+            if staker_info.pool_info.is_some() {
                 staker_balance.update_pool_amount(new_amount: pool_amount);
             }
             self
                 .staker_balance_trace
                 .entry(key: staker_address)
-                .insert(key: FIRST_VALID_EPOCH, value: staker_balance);
+                .insert(key: STARTING_EPOCH, value: staker_balance);
             staker_balance
         }
 
@@ -1496,7 +1542,7 @@ pub mod Staking {
             } else {
                 let (epoch, staker_balance) = trace.penultimate();
                 // TODO: Catch this assert in tests.
-                assert!(epoch <= self.get_current_epoch(), "{}", Error::INVALID_PENULTIMATE);
+                assert!(epoch <= self.get_current_epoch(), "{}", GenericError::INVALID_PENULTIMATE);
                 staker_balance
             }
         }

@@ -13,7 +13,7 @@ pub(crate) enum Error {
     MISSING_POOL_CONTRACT,
     DELEGATION_POOL_MISMATCH,
     GLOBAL_INDEX_DIFF_NOT_INDEX_TYPE,
-    GLOBAL_INDEX_DIFF_COMPUTATION_OVERFLOW,
+    REWARDS_COMPUTATION_OVERFLOW,
     UNEXPECTED_BALANCE,
     STAKER_ALREADY_HAS_POOL,
     CONTRACT_IS_PAUSED,
@@ -37,9 +37,9 @@ pub(crate) enum Error {
     INVALID_EPOCH_DURATION,
     PENULTIMATE_NOT_EXIST,
     INVALID_STARTING_BLOCK,
-    INVALID_PENULTIMATE,
     STAKER_BALANCE_NOT_INITIALIZED,
     STAKER_ADDRESS_ALREADY_USED,
+    STAKER_MIGRATION_NOT_ALLOWED_WITH_POOL,
 }
 
 impl DescribableError of Describable<Error> {
@@ -59,7 +59,7 @@ impl DescribableError of Describable<Error> {
             Error::MISSING_POOL_CONTRACT => "Staker does not have a pool contract",
             Error::DELEGATION_POOL_MISMATCH => "to_pool is not the delegation pool contract for to_staker",
             Error::GLOBAL_INDEX_DIFF_NOT_INDEX_TYPE => "Global index diff does not fit in u128",
-            Error::GLOBAL_INDEX_DIFF_COMPUTATION_OVERFLOW => "Overflow during computation global index diff",
+            Error::REWARDS_COMPUTATION_OVERFLOW => "Overflow during computation rewards",
             Error::UNEXPECTED_BALANCE => "Unexpected balance",
             Error::STAKER_ALREADY_HAS_POOL => "Staker already has a pool",
             Error::CONTRACT_IS_PAUSED => "Contract is paused",
@@ -81,9 +81,9 @@ impl DescribableError of Describable<Error> {
             Error::INVALID_EPOCH_DURATION => "Invalid epoch duration, must be greater than 0",
             Error::PENULTIMATE_NOT_EXIST => "Penultimate balance does not exist, staker balance at this epoch is 0",
             Error::INVALID_STARTING_BLOCK => "Invalid starting block, must be greater than or equal to current block number",
-            Error::INVALID_PENULTIMATE => "Invalid penultimate epoch, must be lower than or equal to current epoch",
             Error::STAKER_BALANCE_NOT_INITIALIZED => "Staker balance is not initialized",
             Error::STAKER_ADDRESS_ALREADY_USED => "Staker address is already used",
+            Error::STAKER_MIGRATION_NOT_ALLOWED_WITH_POOL => "Staker migration is not allowed, staker has a pool",
         }
     }
 }
