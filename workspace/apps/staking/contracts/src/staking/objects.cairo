@@ -1,17 +1,17 @@
 use core::cmp::max;
 use core::num::traits::Zero;
+use staking::constants::STARTING_EPOCH;
 use staking::staking::errors::Error;
-use staking::staking::interface::{
-    CommissionCommitment, IStakingDispatcherTrait, IStakingLibraryDispatcher, StakerInfo,
-    StakerPoolInfo,
+use staking::staking::interface::{CommissionCommitment, StakerInfoV1, StakerPoolInfoV1};
+use staking::staking::interface_v0::{
+    IStakingV0DispatcherTrait, IStakingV0LibraryDispatcher, StakerInfo, StakerPoolInfo,
 };
-use staking::types::{Amount, Epoch, Index, InternalStakerInfoLatest};
+use staking::types::{Amount, Commission, Epoch, Index, InternalStakerInfoLatest};
 use starknet::{ClassHash, ContractAddress, get_block_number};
 use starkware_utils::errors::OptionAuxTrait;
 use starkware_utils::types::time::time::{Time, TimeDelta, Timestamp};
 
 const SECONDS_IN_YEAR: u64 = 365 * 24 * 60 * 60;
-const STARTING_EPOCH: Epoch = 0;
 
 #[derive(Hash, Drop, Serde, Copy, starknet::Store)]
 pub(crate) struct UndelegateIntentKey {
@@ -163,7 +163,10 @@ mod epoch_info_tests {
     use core::num::traits::Zero;
     use snforge_std::start_cheat_block_number_global;
     use staking::staking::objects::{EpochInfo, EpochInfoTrait};
+    use staking::test_utils::constants::{EPOCH_DURATION, EPOCH_LENGTH, EPOCH_STARTING_BLOCK};
     use starknet::get_block_number;
+    use starkware_utils_testing::test_utils::advance_block_number_global;
+    use super::SECONDS_IN_YEAR;
 
     #[test]
     fn test_new() {
@@ -203,6 +206,209 @@ mod epoch_info_tests {
         start_cheat_block_number_global(block_number: 1);
         EpochInfoTrait::new(epoch_duration: 1, epoch_length: 1, starting_block: Zero::zero());
     }
+
+    #[test]
+    fn test_epoch_len_in_blocks() {
+        let old_epoch_duration = EPOCH_DURATION;
+        let old_epoch_length = EPOCH_LENGTH;
+        let starting_block = EPOCH_STARTING_BLOCK;
+        start_cheat_block_number_global(block_number: starting_block);
+        let mut epoch_info = EpochInfoTrait::new(
+            epoch_duration: old_epoch_duration, epoch_length: old_epoch_length, :starting_block,
+        );
+        assert!(epoch_info.epoch_len_in_blocks() == old_epoch_length);
+
+        // Updates epoch info.
+        let new_epoch_duration = old_epoch_duration * 15;
+        let new_epoch_length = old_epoch_length * 15;
+        advance_block_number_global(blocks: old_epoch_length.into());
+        epoch_info.update(epoch_duration: new_epoch_duration, epoch_length: new_epoch_length);
+
+        // Assert that the epoch length remains unchanged in the same epoch.
+        assert!(epoch_info.epoch_len_in_blocks() == old_epoch_length);
+
+        // Assert that the epoch length is updated after advancing epoch.
+        advance_block_number_global(blocks: old_epoch_length.into());
+        assert!(epoch_info.epoch_len_in_blocks() == new_epoch_length);
+    }
+
+    #[test]
+    fn test_update() {
+        let old_epoch_duration = EPOCH_DURATION;
+        let old_epoch_length = EPOCH_LENGTH;
+        let starting_block = EPOCH_STARTING_BLOCK;
+        start_cheat_block_number_global(block_number: starting_block);
+        let mut epoch_info = EpochInfoTrait::new(
+            epoch_duration: old_epoch_duration, epoch_length: old_epoch_length, :starting_block,
+        );
+        advance_block_number_global(blocks: old_epoch_length.into());
+
+        let new_epoch_duration = old_epoch_duration * 15;
+        let new_epoch_length = old_epoch_length * 15;
+        let expected_epoch_info = EpochInfo {
+            epoch_duration: new_epoch_duration,
+            length: new_epoch_length,
+            starting_block: epoch_info.current_epoch_starting_block() + epoch_info.length.into(),
+            starting_epoch: epoch_info.current_epoch() + 1,
+            previous_length: epoch_info.length,
+            previous_epoch_duration: epoch_info.epoch_duration,
+        };
+        epoch_info.update(epoch_duration: new_epoch_duration, epoch_length: new_epoch_length);
+        assert!(epoch_info == expected_epoch_info);
+    }
+
+    #[test]
+    #[should_panic(expected: "Invalid epoch length, must be greater than 0")]
+    fn test_update_with_invalid_epoch_length() {
+        let epoch_duration = EPOCH_DURATION;
+        let epoch_length = EPOCH_LENGTH;
+        let starting_block = EPOCH_STARTING_BLOCK;
+        start_cheat_block_number_global(block_number: starting_block);
+        let mut epoch_info = EpochInfoTrait::new(:epoch_duration, :epoch_length, :starting_block);
+        advance_block_number_global(blocks: epoch_length.into());
+
+        epoch_info.update(:epoch_duration, epoch_length: Zero::zero());
+    }
+
+    #[test]
+    #[should_panic(expected: "Invalid epoch duration, must be greater than 0")]
+    fn test_update_with_invalid_epoch_duration() {
+        let epoch_duration = EPOCH_DURATION;
+        let epoch_length = EPOCH_LENGTH;
+        let starting_block = EPOCH_STARTING_BLOCK;
+        start_cheat_block_number_global(block_number: starting_block);
+        let mut epoch_info = EpochInfoTrait::new(:epoch_duration, :epoch_length, :starting_block);
+        advance_block_number_global(blocks: epoch_length.into());
+
+        epoch_info.update(epoch_duration: Zero::zero(), :epoch_length);
+    }
+
+    #[test]
+    #[should_panic(expected: "Epoch info already updated in this epoch")]
+    fn test_update_twice() {
+        let epoch_duration = EPOCH_DURATION;
+        let epoch_length = EPOCH_LENGTH;
+        let starting_block = EPOCH_STARTING_BLOCK;
+        start_cheat_block_number_global(block_number: starting_block);
+        let mut epoch_info = EpochInfoTrait::new(:epoch_duration, :epoch_length, :starting_block);
+        advance_block_number_global(blocks: epoch_length.into());
+
+        epoch_info.update(:epoch_duration, :epoch_length);
+        epoch_info.update(:epoch_duration, :epoch_length);
+    }
+
+    #[test]
+    #[should_panic(expected: "Epoch info can not be updated in the first epoch")]
+    fn test_update_in_first_epoch() {
+        let epoch_duration = EPOCH_DURATION;
+        let epoch_length = EPOCH_LENGTH;
+        let starting_block = EPOCH_STARTING_BLOCK;
+        start_cheat_block_number_global(block_number: starting_block);
+        let mut epoch_info = EpochInfoTrait::new(:epoch_duration, :epoch_length, :starting_block);
+
+        epoch_info.update(:epoch_duration, :epoch_length);
+    }
+
+    #[test]
+    fn test_epochs_in_year() {
+        let old_epoch_duration = EPOCH_DURATION;
+        let old_epoch_length = EPOCH_LENGTH;
+        let starting_block = EPOCH_STARTING_BLOCK;
+        start_cheat_block_number_global(block_number: starting_block);
+        let mut epoch_info = EpochInfoTrait::new(
+            epoch_duration: old_epoch_duration, epoch_length: old_epoch_length, :starting_block,
+        );
+        assert!(epoch_info.epochs_in_year() == SECONDS_IN_YEAR / old_epoch_duration.into());
+
+        let new_epoch_duration = old_epoch_duration * 15;
+        let new_epoch_length = old_epoch_length * 15;
+        advance_block_number_global(blocks: old_epoch_length.into());
+        epoch_info.update(epoch_duration: new_epoch_duration, epoch_length: new_epoch_length);
+        assert!(epoch_info.epochs_in_year() == SECONDS_IN_YEAR / old_epoch_duration.into());
+
+        advance_block_number_global(blocks: old_epoch_length.into());
+        assert!(epoch_info.epochs_in_year() == SECONDS_IN_YEAR / new_epoch_duration.into());
+    }
+
+    #[test]
+    fn test_current_epoch() {
+        let epoch_duration = EPOCH_DURATION;
+        let old_epoch_length = EPOCH_LENGTH;
+        let starting_block = EPOCH_STARTING_BLOCK;
+        start_cheat_block_number_global(block_number: starting_block);
+        let mut epoch_info = EpochInfoTrait::new(
+            :epoch_duration, epoch_length: old_epoch_length, :starting_block,
+        );
+        let current_epoch_before = epoch_info.current_epoch();
+
+        advance_block_number_global(blocks: old_epoch_length.into() - 1);
+        assert!(epoch_info.current_epoch() == current_epoch_before);
+
+        advance_block_number_global(blocks: 1);
+        assert!(epoch_info.current_epoch() == current_epoch_before + 1);
+
+        // Updates epoch info.
+        let new_epoch_length = old_epoch_length * 15;
+        let current_epoch_before = epoch_info.current_epoch();
+        epoch_info.update(:epoch_duration, epoch_length: new_epoch_length);
+
+        assert!(epoch_info.current_epoch() == current_epoch_before);
+
+        advance_block_number_global(blocks: old_epoch_length.into() - 1);
+        assert!(epoch_info.current_epoch() == current_epoch_before);
+
+        advance_block_number_global(blocks: 1);
+        assert!(epoch_info.current_epoch() == current_epoch_before + 1);
+
+        advance_block_number_global(blocks: new_epoch_length.into() - 1);
+        assert!(epoch_info.current_epoch() == current_epoch_before + 1);
+
+        advance_block_number_global(blocks: 1);
+        assert!(epoch_info.current_epoch() == current_epoch_before + 2);
+    }
+
+    #[test]
+    fn test_current_epoch_starting_block() {
+        let epoch_duration = EPOCH_DURATION;
+        let old_epoch_length = EPOCH_LENGTH;
+        let starting_block = EPOCH_STARTING_BLOCK;
+        start_cheat_block_number_global(block_number: starting_block);
+        let mut epoch_info = EpochInfoTrait::new(
+            :epoch_duration, epoch_length: old_epoch_length, :starting_block,
+        );
+
+        let mut expected_epoch_starting_block = starting_block;
+        advance_block_number_global(blocks: old_epoch_length.into() - 1);
+        assert!(epoch_info.current_epoch_starting_block() == expected_epoch_starting_block);
+
+        advance_block_number_global(blocks: 1);
+        expected_epoch_starting_block += old_epoch_length.into();
+        assert!(epoch_info.current_epoch_starting_block() == expected_epoch_starting_block);
+
+        // Updates epoch info.
+        let new_epoch_length = old_epoch_length.into() * 15;
+        epoch_info.update(:epoch_duration, epoch_length: new_epoch_length);
+
+        advance_block_number_global(blocks: old_epoch_length.into() - 1);
+        assert!(epoch_info.current_epoch_starting_block() == expected_epoch_starting_block);
+
+        advance_block_number_global(blocks: 1);
+        expected_epoch_starting_block += old_epoch_length.into();
+        assert!(epoch_info.current_epoch_starting_block() == expected_epoch_starting_block);
+
+        advance_block_number_global(blocks: new_epoch_length.into() - 1);
+        assert!(epoch_info.current_epoch_starting_block() == expected_epoch_starting_block);
+
+        advance_block_number_global(blocks: 1);
+        expected_epoch_starting_block += new_epoch_length.into();
+        assert!(epoch_info.current_epoch_starting_block() == expected_epoch_starting_block);
+    }
+}
+
+#[derive(Debug, PartialEq, Drop, Serde, Copy, starknet::Store)]
+pub struct InternalStakerPoolInfoV1 {
+    pub pool_contract: ContractAddress,
+    pub commission: Commission,
 }
 
 #[derive(Debug, PartialEq, Drop, Serde, Copy, starknet::Store)]
@@ -223,11 +429,8 @@ pub(crate) struct InternalStakerInfoV1 {
     pub(crate) reward_address: ContractAddress,
     pub(crate) operational_address: ContractAddress,
     pub(crate) unstake_time: Option<Timestamp>,
-    // **Note**: This field was used in V0 and no longer in use in the new rewards mechanism
-    // introduced in V1. Still in use in `pool_migration`.
-    pub(crate) _deprecated_index_V0: Index,
     pub(crate) unclaimed_rewards_own: Amount,
-    pub(crate) pool_info: Option<StakerPoolInfo>,
+    pub(crate) pool_info: Option<InternalStakerPoolInfoV1>,
     pub(crate) commission_commitment: Option<CommissionCommitment>,
 }
 
@@ -245,21 +448,37 @@ pub(crate) enum VersionedInternalStakerInfo {
 pub(crate) impl InternalStakerInfoConvert of InternalStakerInfoConvertTrait {
     fn convert(
         self: InternalStakerInfo, prev_class_hash: ClassHash, staker_address: ContractAddress,
-    ) -> (InternalStakerInfoV1, Amount) {
-        let library_dispatcher = IStakingLibraryDispatcher { class_hash: prev_class_hash };
-        let staker_info = library_dispatcher.staker_info(staker_address);
+    ) -> (InternalStakerInfoV1, Amount, Index, Amount, Amount) {
+        let library_dispatcher = IStakingV0LibraryDispatcher { class_hash: prev_class_hash };
+        let staker_info: StakerInfo = library_dispatcher.staker_info(:staker_address);
         let internal_staker_info_v1 = InternalStakerInfoV1 {
             reward_address: staker_info.reward_address,
             operational_address: staker_info.operational_address,
             unstake_time: staker_info.unstake_time,
-            _deprecated_index_V0: staker_info.index,
             unclaimed_rewards_own: staker_info.unclaimed_rewards_own,
-            pool_info: staker_info.pool_info,
+            pool_info: match staker_info.pool_info {
+                Option::Some(pool_info) => Option::Some(
+                    InternalStakerPoolInfoV1 {
+                        pool_contract: pool_info.pool_contract, commission: pool_info.commission,
+                    },
+                ),
+                Option::None => Option::None,
+            },
             // This assumes that the function is called only during migration. in a different
             // context, the commission commitment will be lost.
             commission_commitment: Option::None,
         };
-        (internal_staker_info_v1, staker_info.amount_own)
+        let (pool_unclaimed_rewards, pool_amount) = match staker_info.pool_info {
+            Option::Some(pool_info) => (pool_info.unclaimed_rewards, pool_info.amount),
+            Option::None => (Zero::zero(), Zero::zero()),
+        };
+        (
+            internal_staker_info_v1,
+            staker_info.amount_own,
+            staker_info.index,
+            pool_unclaimed_rewards,
+            pool_amount,
+        )
     }
 }
 
@@ -273,14 +492,13 @@ pub(crate) impl VersionedInternalStakerInfoImpl of VersionedInternalStakerInfoTr
     fn new_latest(
         reward_address: ContractAddress,
         operational_address: ContractAddress,
-        pool_info: Option<StakerPoolInfo>,
+        pool_info: Option<InternalStakerPoolInfoV1>,
     ) -> VersionedInternalStakerInfo {
         VersionedInternalStakerInfo::V1(
             InternalStakerInfoV1 {
                 reward_address,
                 operational_address,
                 unstake_time: Option::None,
-                _deprecated_index_V0: Zero::zero(),
                 unclaimed_rewards_own: Zero::zero(),
                 pool_info,
                 commission_commitment: Option::None,
@@ -297,6 +515,13 @@ pub(crate) impl VersionedInternalStakerInfoImpl of VersionedInternalStakerInfoTr
 }
 
 #[generate_trait]
+pub(crate) impl InternalStakerInfoImpl of InternalStakerInfoTrait {
+    fn pool_info(self: @InternalStakerInfo) -> Option<StakerPoolInfo> {
+        *self.pool_info
+    }
+}
+
+#[generate_trait]
 pub(crate) impl InternalStakerInfoLatestImpl of InternalStakerInfoLatestTrait {
     fn compute_unpool_time(
         self: @InternalStakerInfoLatest, exit_wait_window: TimeDelta,
@@ -307,35 +532,50 @@ pub(crate) impl InternalStakerInfoLatestImpl of InternalStakerInfoLatestTrait {
         Time::now().add(delta: exit_wait_window)
     }
 
-    fn get_pool_info(self: @InternalStakerInfoLatest) -> StakerPoolInfo {
+    fn get_pool_info(self: @InternalStakerInfoLatest) -> InternalStakerPoolInfoV1 {
         (*self.pool_info).expect_with_err(Error::MISSING_POOL_CONTRACT)
     }
 }
 
-impl InternalStakerInfoLatestIntoStakerInfo of Into<InternalStakerInfoLatest, StakerInfo> {
-    fn into(self: InternalStakerInfoLatest) -> StakerInfo {
-        StakerInfo {
+impl InternalStakerInfoLatestIntoStakerInfoV1 of Into<InternalStakerInfoLatest, StakerInfoV1> {
+    fn into(self: InternalStakerInfoLatest) -> StakerInfoV1 {
+        StakerInfoV1 {
             reward_address: self.reward_address,
             operational_address: self.operational_address,
             unstake_time: self.unstake_time,
             amount_own: Zero::zero(),
-            index: Zero::zero(),
             unclaimed_rewards_own: self.unclaimed_rewards_own,
-            pool_info: self.pool_info,
+            pool_info: match self.pool_info {
+                Option::Some(pool_info) => Option::Some(
+                    StakerPoolInfoV1 {
+                        pool_contract: pool_info.pool_contract,
+                        amount: Zero::zero(),
+                        commission: pool_info.commission,
+                    },
+                ),
+                Option::None => Option::None,
+            },
         }
     }
 }
 
 #[cfg(test)]
-pub(crate) impl StakerInfoIntoInternalStakerInfoV1 of Into<StakerInfo, InternalStakerInfoV1> {
-    fn into(self: StakerInfo) -> InternalStakerInfoV1 {
+#[generate_trait]
+pub(crate) impl StakerInfoIntoInternalStakerInfoV1Impl of StakerInfoIntoInternalStakerInfoV1ITrait {
+    fn to_internal(self: StakerInfoV1) -> InternalStakerInfoV1 {
         InternalStakerInfoV1 {
             reward_address: self.reward_address,
             operational_address: self.operational_address,
             unstake_time: self.unstake_time,
-            _deprecated_index_V0: self.index,
             unclaimed_rewards_own: self.unclaimed_rewards_own,
-            pool_info: self.pool_info,
+            pool_info: match self.pool_info {
+                Option::Some(pool_info) => Option::Some(
+                    InternalStakerPoolInfoV1 {
+                        pool_contract: pool_info.pool_contract, commission: pool_info.commission,
+                    },
+                ),
+                Option::None => Option::None,
+            },
             // This assumes that the function is called only during migration. in a different
             // context, the commission commitment will be lost.
             commission_commitment: Option::None,
@@ -454,15 +694,5 @@ pub impl AttestationInfoImpl of AttestationInfoTrait {
     }
     fn current_epoch_starting_block(self: @AttestationInfo) -> u64 {
         *self.current_epoch_starting_block
-    }
-    fn get_next_epoch_attestation_info(self: @AttestationInfo) -> AttestationInfo {
-        Self::new(
-            staker_address: *self.staker_address,
-            stake: *self.stake,
-            epoch_len: *self.epoch_len,
-            epoch_id: *self.epoch_id + 1,
-            current_epoch_starting_block: *self.current_epoch_starting_block
-                + (*self.epoch_len).into(),
-        )
     }
 }

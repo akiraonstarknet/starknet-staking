@@ -27,16 +27,16 @@ pub trait IStaking<TContractState> {
     fn unstake_action(ref self: TContractState, staker_address: ContractAddress) -> Amount;
     fn change_reward_address(ref self: TContractState, reward_address: ContractAddress);
     fn set_open_for_delegation(ref self: TContractState, commission: Commission) -> ContractAddress;
-    fn staker_info(self: @TContractState, staker_address: ContractAddress) -> StakerInfo;
-    fn get_staker_info(
+    fn staker_info_v1(self: @TContractState, staker_address: ContractAddress) -> StakerInfoV1;
+    fn get_staker_info_v1(
         self: @TContractState, staker_address: ContractAddress,
-    ) -> Option<StakerInfo>;
+    ) -> Option<StakerInfoV1>;
     fn get_current_epoch(self: @TContractState) -> Epoch;
     fn get_epoch_info(self: @TContractState) -> EpochInfo;
     fn get_staker_commission_commitment(
         self: @TContractState, staker_address: ContractAddress,
     ) -> CommissionCommitment;
-    fn contract_parameters(self: @TContractState) -> StakingContractInfo;
+    fn contract_parameters_v1(self: @TContractState) -> StakingContractInfoV1;
     fn get_total_stake(self: @TContractState) -> Amount;
     fn get_current_total_staking_power(self: @TContractState) -> Amount;
     fn get_pool_exit_intent(
@@ -62,16 +62,15 @@ pub trait IStakingMigration<TContractState> {
         self: @TContractState, staker_address: ContractAddress,
     ) -> InternalStakerInfoLatest;
 
+
     /// Reads the internal staker information for the given `staker_address` from storage
     /// and converts it to V1. Writes the updated version to storage and initializes the staker's
     /// balance trace.
     ///
-    /// Precondition: The staker exists and its version is V0.
+    /// Precondition: The staker exists, does not have a pool and its version is V0.
     ///
     /// This function is used only during migration.
-    fn convert_internal_staker_info(
-        ref self: TContractState, staker_address: ContractAddress,
-    ) -> InternalStakerInfoLatest;
+    fn staker_migration(ref self: TContractState, staker_address: ContractAddress);
 }
 
 /// Interface for the staking pool contract.
@@ -184,7 +183,6 @@ pub trait IStakingConfig<TContractState> {
 
 #[starknet::interface]
 pub trait IStakingAttestation<TContractState> {
-    // TODO: Rename once internal update_rewards is deleted.
     fn update_rewards_from_attestation_contract(
         ref self: TContractState, staker_address: ContractAddress,
     );
@@ -383,8 +381,22 @@ pub mod ConfigEvents {
     }
 }
 
+/// `StakingContractInfo` struct used in V0.
+/// **Note**: This struct should not be used in V1. It should only be used for testing.
+#[cfg(test)]
 #[derive(Copy, Debug, Drop, PartialEq, Serde)]
 pub struct StakingContractInfo {
+    pub min_stake: Amount,
+    pub token_address: ContractAddress,
+    pub global_index: Index,
+    pub pool_contract_class_hash: ClassHash,
+    pub reward_supplier: ContractAddress,
+    pub exit_wait_window: TimeDelta,
+}
+
+/// `StakingContractInfo` struct used in V1.
+#[derive(Copy, Debug, Drop, PartialEq, Serde)]
+pub struct StakingContractInfoV1 {
     pub min_stake: Amount,
     pub token_address: ContractAddress,
     pub attestation_contract: ContractAddress,
@@ -394,54 +406,25 @@ pub struct StakingContractInfo {
 }
 
 #[derive(Debug, PartialEq, Drop, Serde, Copy, starknet::Store)]
-pub struct StakerInfo {
+pub struct StakerInfoV1 {
     pub reward_address: ContractAddress,
     pub operational_address: ContractAddress,
     pub unstake_time: Option<Timestamp>,
     pub amount_own: Amount,
-    pub index: Index,
     pub unclaimed_rewards_own: Amount,
-    pub pool_info: Option<StakerPoolInfo>,
+    pub pool_info: Option<StakerPoolInfoV1>,
 }
 
 #[derive(Debug, PartialEq, Drop, Serde, Copy, starknet::Store)]
-pub struct StakerPoolInfo {
+pub struct StakerPoolInfoV1 {
     pub pool_contract: ContractAddress,
-    // TODO: Create a public version of this struct and make amount public?
-    amount: Amount,
-    // TODO: Create a public version of this struct and make unclaimed_rewards public?
-    unclaimed_rewards: Amount,
+    pub amount: Amount,
     pub commission: Commission,
 }
 
 #[generate_trait]
-pub impl StakerPoolInfoImpl of StakerPoolInfoTrait {
-    fn new(pool_contract: ContractAddress, commission: Commission) -> StakerPoolInfo {
-        StakerPoolInfo {
-            pool_contract, amount: Zero::zero(), unclaimed_rewards: Zero::zero(), commission,
-        }
-    }
-
-    fn _deprecated_amount(self: @StakerPoolInfo) -> Amount {
-        *self.amount
-    }
-
-    fn _set_deprecated_amount(ref self: StakerPoolInfo, amount: Amount) {
-        self.amount = amount;
-    }
-
-    fn _deprecated_unclaimed_rewards(self: @StakerPoolInfo) -> Amount {
-        *self.unclaimed_rewards
-    }
-
-    fn _set_deprecated_unclaimed_rewards(ref self: StakerPoolInfo, unclaimed_rewards: Amount) {
-        self.unclaimed_rewards = unclaimed_rewards;
-    }
-}
-
-#[generate_trait]
-pub impl StakerInfoImpl of StakerInfoTrait {
-    fn get_pool_info(self: StakerInfo) -> StakerPoolInfo {
+pub impl StakerInfoV1Impl of StakerInfoV1Trait {
+    fn get_pool_info(self: StakerInfoV1) -> StakerPoolInfoV1 {
         self.pool_info.expect_with_err(Error::MISSING_POOL_CONTRACT)
     }
 }

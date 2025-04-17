@@ -17,24 +17,29 @@ use openzeppelin::token::erc20::interface::{IERC20Dispatcher, IERC20DispatcherTr
 use snforge_std::{
     ContractClassTrait, DeclareResultTrait, start_cheat_block_number_global, test_address,
 };
-use staking::constants::{C_DENOM, DEFAULT_C_NUM, DEFAULT_EXIT_WAIT_WINDOW, MIN_ATTESTATION_WINDOW};
+use staking::constants::{
+    C_DENOM, DEFAULT_C_NUM, DEFAULT_EXIT_WAIT_WINDOW, MIN_ATTESTATION_WINDOW, STARTING_EPOCH,
+};
 use staking::errors::GenericError;
 use staking::minting_curve::interface::{
     IMintingCurveDispatcher, IMintingCurveDispatcherTrait, MintingCurveContractInfo,
 };
 use staking::minting_curve::minting_curve::MintingCurve;
-use staking::pool::interface::{IPoolDispatcher, IPoolDispatcherTrait, PoolMemberInfo};
+use staking::pool::interface::{IPoolDispatcher, IPoolDispatcherTrait};
+use staking::pool::interface_v0::PoolMemberInfo;
 use staking::pool::pool::Pool;
 use staking::pool::pool_member_balance_trace::trace::PoolMemberCheckpointTrait;
 use staking::reward_supplier::reward_supplier::RewardSupplier;
 use staking::staking::interface::{
     IStaking, IStakingDispatcher, IStakingDispatcherTrait, IStakingPauseDispatcher,
-    IStakingPauseDispatcherTrait, StakerInfo, StakerInfoTrait, StakerPoolInfo, StakerPoolInfoTrait,
+    IStakingPauseDispatcherTrait, StakerInfoV1, StakerInfoV1Trait,
 };
+use staking::staking::interface_v0::{StakerInfo, StakerPoolInfo};
 use staking::staking::objects::{EpochInfo, EpochInfoTrait, InternalStakerInfoLatestTrait};
 use staking::staking::staking::Staking;
 use staking::types::{
     Amount, Commission, Index, InternalPoolMemberInfoLatest, InternalStakerInfoLatest,
+    InternalStakerPoolInfoLatest,
 };
 use staking::utils::{
     compute_commission_amount_rounded_down, compute_commission_amount_rounded_up,
@@ -554,7 +559,7 @@ pub(crate) fn stake_with_pool_enabled(
     stake_for_testing_using_dispatcher(:cfg, :token_address, :staking_contract);
     let staking_dispatcher = IStakingDispatcher { contract_address: staking_contract };
     let pool_contract = staking_dispatcher
-        .staker_info(cfg.test_info.staker_address)
+        .staker_info_v1(cfg.test_info.staker_address)
         .get_pool_info()
         .pool_contract;
     pool_contract
@@ -589,6 +594,14 @@ pub(crate) fn enter_delegation_pool_for_testing_using_dispatcher(
             reward_address: cfg.pool_member_info.reward_address,
             amount: cfg.pool_member_info._deprecated_amount,
         )
+}
+
+pub(crate) fn claim_rewards_for_pool_member(
+    pool_contract: ContractAddress, pool_member: ContractAddress,
+) -> Amount {
+    cheat_caller_address_once(contract_address: pool_contract, caller_address: pool_member);
+    let pool_dispatcher = IPoolDispatcher { contract_address: pool_contract };
+    pool_dispatcher.claim_rewards(:pool_member)
 }
 
 /// *****WARNING*****
@@ -844,7 +857,7 @@ pub(crate) struct TestInfo {
 }
 
 #[derive(Drop, Copy)]
-struct RewardSupplierInfo {
+struct RewardSupplierInfoV1 {
     pub base_mint_amount: Amount,
     pub minting_curve_contract: ContractAddress,
     pub l1_reward_supplier: felt252,
@@ -859,7 +872,7 @@ pub(crate) struct StakingInitConfig {
     pub staking_contract_info: StakingContractInfoCfg,
     pub minting_curve_contract_info: MintingCurveContractInfo,
     pub test_info: TestInfo,
-    pub reward_supplier: RewardSupplierInfo,
+    pub reward_supplier: RewardSupplierInfoV1,
 }
 
 impl StakingInitConfigDefault of Default<StakingInitConfig> {
@@ -868,12 +881,11 @@ impl StakingInitConfigDefault of Default<StakingInitConfig> {
             reward_address: STAKER_REWARD_ADDRESS(),
             operational_address: OPERATIONAL_ADDRESS(),
             unstake_time: Option::None,
-            _deprecated_index_V0: Zero::zero(),
             unclaimed_rewards_own: 0,
             pool_info: Option::Some(
-                StakerPoolInfoTrait::new(
+                InternalStakerPoolInfoLatest {
                     pool_contract: POOL_CONTRACT_ADDRESS(), commission: COMMISSION,
-                ),
+                },
             ),
             commission_commitment: Option::None,
         };
@@ -887,7 +899,7 @@ impl StakingInitConfigDefault of Default<StakingInitConfig> {
             unpool_amount: Zero::zero(),
             entry_to_claim_from: Zero::zero(),
             reward_checkpoint: PoolMemberCheckpointTrait::new(
-                epoch: Zero::zero(),
+                epoch: STARTING_EPOCH,
                 balance: Zero::zero(),
                 cumulative_rewards_trace_idx: Zero::zero(),
             ),
@@ -927,7 +939,7 @@ impl StakingInitConfigDefault of Default<StakingInitConfig> {
             app_governor: APP_GOVERNOR(),
             global_index: Zero::zero(),
         };
-        let reward_supplier = RewardSupplierInfo {
+        let reward_supplier = RewardSupplierInfoV1 {
             base_mint_amount: BASE_MINT_AMOUNT,
             minting_curve_contract: MINTING_CONTRACT_ADDRESS(),
             l1_reward_supplier: L1_REWARD_SUPPLIER,
@@ -959,15 +971,17 @@ pub struct StakingContractInfoCfg {
 
 /// Update rewards for staker and pool.
 /// **Note**: The index of the returned staker info is set to zero.
-pub(crate) fn staker_update_rewards(staker_info: StakerInfo, global_index: Index) -> StakerInfo {
+pub(crate) fn staker_update_old_rewards(
+    staker_info: StakerInfo, global_index: Index,
+) -> StakerInfo {
     let interest: Index = global_index - staker_info.index;
     let mut staker_rewards = compute_rewards_rounded_down(
         amount: staker_info.amount_own, :interest,
     );
     let mut staker_pool_info: Option<StakerPoolInfo> = Option::None;
-    if let Option::Some(pool_info) = staker_info.pool_info {
+    if let Option::Some(mut pool_info) = staker_info.pool_info {
         let pool_rewards_including_commission = compute_rewards_rounded_up(
-            amount: pool_info._deprecated_amount(), :interest,
+            amount: pool_info.amount, :interest,
         );
         let commission_amount = compute_commission_amount_rounded_down(
             rewards_including_commission: pool_rewards_including_commission,
@@ -975,13 +989,8 @@ pub(crate) fn staker_update_rewards(staker_info: StakerInfo, global_index: Index
         );
         staker_rewards += commission_amount;
         let pool_rewards = pool_rewards_including_commission - commission_amount;
-        let mut staker_pool_info_internal = StakerPoolInfoTrait::new(
-            pool_contract: pool_info.pool_contract, commission: pool_info.commission,
-        );
-        staker_pool_info_internal
-            ._set_deprecated_unclaimed_rewards(unclaimed_rewards: pool_rewards);
-        staker_pool_info_internal._set_deprecated_amount(pool_info._deprecated_amount());
-        staker_pool_info = Option::Some(staker_pool_info_internal);
+        pool_info.unclaimed_rewards += pool_rewards;
+        staker_pool_info = Option::Some(pool_info);
     }
     StakerInfo {
         index: Zero::zero(),
@@ -1016,7 +1025,7 @@ pub(crate) fn advance_epoch_global() {
 }
 
 pub(crate) fn calculate_staker_total_rewards(
-    staker_info: StakerInfo,
+    staker_info: StakerInfoV1,
     staking_contract: ContractAddress,
     minting_curve_contract: ContractAddress,
 ) -> Amount {
@@ -1044,7 +1053,7 @@ fn calculate_current_epoch_rewards(
 }
 
 pub(crate) fn calculate_staker_own_rewards_including_commission(
-    staker_info: StakerInfo, total_rewards: Amount,
+    staker_info: StakerInfoV1, total_rewards: Amount,
 ) -> Amount {
     let own_rewards = get_staker_own_rewards(:staker_info, :total_rewards);
     let commission_rewards = get_staker_commission_rewards(
@@ -1053,7 +1062,7 @@ pub(crate) fn calculate_staker_own_rewards_including_commission(
     own_rewards + commission_rewards
 }
 
-fn get_staker_own_rewards(staker_info: StakerInfo, total_rewards: Amount) -> Amount {
+fn get_staker_own_rewards(staker_info: StakerInfoV1, total_rewards: Amount) -> Amount {
     let own_rewards = mul_wide_and_div(
         lhs: total_rewards, rhs: staker_info.amount_own, div: get_total_amount(:staker_info),
     )
@@ -1061,7 +1070,7 @@ fn get_staker_own_rewards(staker_info: StakerInfo, total_rewards: Amount) -> Amo
     own_rewards
 }
 
-fn get_staker_commission_rewards(staker_info: StakerInfo, pool_rewards: Amount) -> Amount {
+fn get_staker_commission_rewards(staker_info: StakerInfoV1, pool_rewards: Amount) -> Amount {
     if let Option::Some(pool_info) = staker_info.pool_info {
         return compute_commission_amount_rounded_down(
             rewards_including_commission: pool_rewards, commission: pool_info.commission,
@@ -1070,11 +1079,11 @@ fn get_staker_commission_rewards(staker_info: StakerInfo, pool_rewards: Amount) 
     Zero::zero()
 }
 
-fn get_total_amount(staker_info: StakerInfo) -> Amount {
+fn get_total_amount(staker_info: StakerInfoV1) -> Amount {
     if let Option::Some(pool_info) = staker_info.pool_info {
-        return pool_info._deprecated_amount() + staker_info.amount_own;
+        return pool_info.amount + staker_info.amount_own;
     }
-    (staker_info.amount_own)
+    staker_info.amount_own
 }
 
 /// Calculate pool rewards for one epoch
@@ -1084,7 +1093,7 @@ pub(crate) fn calculate_pool_rewards(
     minting_curve_contract: ContractAddress,
 ) -> Amount {
     let staking_dispatcher = IStakingDispatcher { contract_address: staking_contract };
-    let staker_info = staking_dispatcher.staker_info(:staker_address);
+    let staker_info = staking_dispatcher.staker_info_v1(:staker_address);
     let total_rewards = calculate_staker_total_rewards(
         :staker_info, :staking_contract, :minting_curve_contract,
     );
@@ -1107,7 +1116,7 @@ pub(crate) fn calculate_pool_rewards_with_pool_balance(
     let epoch_rewards = calculate_current_epoch_rewards(:staking_contract, :minting_curve_contract);
     // Calculate staker total rewards.
     let staking_dispatcher = IStakingDispatcher { contract_address: staking_contract };
-    let staker_info = staking_dispatcher.staker_info(:staker_address);
+    let staker_info = staking_dispatcher.staker_info_v1(:staker_address);
     let total_amount = staker_balance + pool_balance;
     let total_rewards = mul_wide_and_div(
         lhs: epoch_rewards,

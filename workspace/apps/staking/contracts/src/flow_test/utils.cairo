@@ -12,16 +12,22 @@ use staking::constants::MIN_ATTESTATION_WINDOW;
 use staking::minting_curve::interface::IMintingCurveDispatcher;
 use staking::pool::interface::{
     IPoolDispatcher, IPoolDispatcherTrait, IPoolMigrationDispatcher, IPoolMigrationDispatcherTrait,
-    IPoolSafeDispatcher, IPoolSafeDispatcherTrait, PoolContractInfo, PoolMemberInfo,
+    IPoolSafeDispatcher, IPoolSafeDispatcherTrait, PoolContractInfoV1, PoolMemberInfoV1,
 };
+use staking::pool::interface_v0::{IPoolV0Dispatcher, IPoolV0DispatcherTrait, PoolMemberInfo};
 use staking::reward_supplier::interface::{
     IRewardSupplierDispatcher, IRewardSupplierDispatcherTrait,
 };
 use staking::staking::interface::{
     IStakingConfigDispatcher, IStakingConfigDispatcherTrait, IStakingDispatcher,
     IStakingDispatcherTrait, IStakingMigrationDispatcher, IStakingMigrationDispatcherTrait,
-    IStakingPoolSafeDispatcher, IStakingPoolSafeDispatcherTrait, IStakingSafeDispatcher,
-    IStakingSafeDispatcherTrait, StakerInfo, StakerInfoTrait, StakerPoolInfoTrait,
+    IStakingPauseDispatcher, IStakingPauseDispatcherTrait, IStakingPoolDispatcher,
+    IStakingPoolDispatcherTrait, IStakingPoolSafeDispatcher, IStakingPoolSafeDispatcherTrait,
+    IStakingSafeDispatcher, IStakingSafeDispatcherTrait, StakerInfoV1, StakerInfoV1Trait,
+};
+use staking::staking::interface_v0::{
+    IStakingV0Dispatcher, IStakingV0DispatcherTrait, IStakingV0ForTestsDispatcher,
+    IStakingV0ForTestsDispatcherTrait, StakerInfo, StakerInfoTrait,
 };
 use staking::staking::objects::{EpochInfo, EpochInfoTrait};
 use staking::test_utils::constants::{
@@ -178,12 +184,37 @@ pub(crate) impl StakingImpl of StakingTrait {
         IStakingDispatcher { contract_address: self.address }
     }
 
+    fn is_v0(self: StakingState) -> bool {
+        let class_hash = snforge_std::get_class_hash(self.address);
+        class_hash == MAINNET_STAKING_CLASS_HASH_V0()
+    }
+
     fn safe_dispatcher(self: StakingState) -> IStakingSafeDispatcher nopanic {
         IStakingSafeDispatcher { contract_address: self.address }
     }
 
+    fn dispatcher_v0(self: StakingState) -> IStakingV0Dispatcher nopanic {
+        IStakingV0Dispatcher { contract_address: self.address }
+    }
+
+    fn dispatcher_v0_for_tests(self: StakingState) -> IStakingV0ForTestsDispatcher nopanic {
+        IStakingV0ForTestsDispatcher { contract_address: self.address }
+    }
+
     fn migration_dispatcher(self: StakingState) -> IStakingMigrationDispatcher nopanic {
         IStakingMigrationDispatcher { contract_address: self.address }
+    }
+
+    fn pause_dispatcher(self: StakingState) -> IStakingPauseDispatcher nopanic {
+        IStakingPauseDispatcher { contract_address: self.address }
+    }
+
+    fn staking_pool_dispatcher(self: StakingState) -> IStakingPoolDispatcher nopanic {
+        IStakingPoolDispatcher { contract_address: self.address }
+    }
+
+    fn safe_staking_pool_dispatcher(self: StakingState) -> IStakingPoolSafeDispatcher nopanic {
+        IStakingPoolSafeDispatcher { contract_address: self.address }
     }
 
     fn set_roles(self: StakingState) {
@@ -215,12 +246,27 @@ pub(crate) impl StakingImpl of StakingTrait {
     }
 
     fn get_pool(self: StakingState, staker: Staker) -> ContractAddress {
-        let staker_info = self.dispatcher().staker_info(staker_address: staker.staker.address);
-        staker_info.get_pool_info().pool_contract
+        if self.is_v0() {
+            self
+                .dispatcher_v0()
+                .staker_info(staker_address: staker.staker.address)
+                .get_pool_info()
+                .pool_contract
+        } else {
+            self
+                .dispatcher()
+                .staker_info_v1(staker_address: staker.staker.address)
+                .get_pool_info()
+                .pool_contract
+        }
     }
 
     fn get_min_stake(self: StakingState) -> Amount {
-        self.dispatcher().contract_parameters().min_stake
+        if self.is_v0() {
+            self.dispatcher_v0_for_tests().contract_parameters().min_stake
+        } else {
+            self.dispatcher().contract_parameters_v1().min_stake
+        }
     }
 
     fn get_total_stake(self: StakingState) -> Amount {
@@ -228,7 +274,11 @@ pub(crate) impl StakingImpl of StakingTrait {
     }
 
     fn get_exit_wait_window(self: StakingState) -> TimeDelta {
-        self.dispatcher().contract_parameters().exit_wait_window
+        if self.is_v0() {
+            self.dispatcher_v0_for_tests().contract_parameters().exit_wait_window
+        } else {
+            self.dispatcher().contract_parameters_v1().exit_wait_window
+        }
     }
 
     fn get_global_index(self: StakingState) -> Index {
@@ -253,6 +303,42 @@ pub(crate) impl StakingImpl of StakingTrait {
 
     fn get_epoch_info(self: StakingState) -> EpochInfo {
         self.dispatcher().get_epoch_info()
+    }
+
+    fn set_epoch_info(self: StakingState, epoch_duration: u32, epoch_length: u32) {
+        cheat_caller_address_once(
+            contract_address: self.address, caller_address: self.roles.token_admin,
+        );
+        let staking_config_dispatcher = IStakingConfigDispatcher { contract_address: self.address };
+        staking_config_dispatcher.set_epoch_info(:epoch_duration, :epoch_length);
+    }
+
+    fn update_global_index_if_needed(self: StakingState) -> bool {
+        self.dispatcher_v0_for_tests().update_global_index_if_needed()
+    }
+
+    fn pause(self: StakingState) {
+        cheat_caller_address_once(
+            contract_address: self.address, caller_address: self.roles.security_agent,
+        );
+        self.pause_dispatcher().pause()
+    }
+
+    fn unpause(self: StakingState) {
+        cheat_caller_address_once(
+            contract_address: self.address, caller_address: self.roles.security_admin,
+        );
+        self.pause_dispatcher().unpause()
+    }
+
+    fn pool_migration(self: StakingState, staker: Staker, pool_address: ContractAddress) -> Index {
+        cheat_caller_address_once(contract_address: self.address, caller_address: pool_address);
+        self.staking_pool_dispatcher().pool_migration(staker_address: staker.staker.address)
+    }
+
+    #[feature("safe_dispatcher")]
+    fn safe_pool_migration(self: StakingState, staker: Staker) -> Result<Index, Array<felt252>> {
+        self.safe_staking_pool_dispatcher().pool_migration(staker_address: staker.staker.address)
     }
 }
 
@@ -470,7 +556,11 @@ pub(crate) impl RewardSupplierImpl of RewardSupplierTrait {
     }
 
     fn get_unclaimed_rewards(self: RewardSupplierState) -> Amount {
-        self.dispatcher().contract_parameters().try_into().unwrap().unclaimed_rewards
+        self.dispatcher().contract_parameters_v1().try_into().unwrap().unclaimed_rewards
+    }
+
+    fn calculate_current_epoch_rewards(self: RewardSupplierState) -> Amount {
+        self.dispatcher().calculate_current_epoch_rewards()
     }
 }
 
@@ -502,7 +592,7 @@ struct AttestationState {
 }
 
 #[generate_trait]
-impl AttestationImpl of AttestationTrait {
+pub(crate) impl AttestationImpl of AttestationTrait {
     fn deploy(self: AttestationConfig, staking: StakingState) -> AttestationState {
         let mut calldata = ArrayTrait::new();
         staking.address.serialize(ref calldata);
@@ -515,6 +605,12 @@ impl AttestationImpl of AttestationTrait {
 
     fn dispatcher(self: AttestationState) -> IAttestationDispatcher nopanic {
         IAttestationDispatcher { contract_address: self.address }
+    }
+
+    fn get_current_epoch_target_attestation_block(
+        self: AttestationState, operational_address: ContractAddress,
+    ) -> u64 {
+        self.dispatcher().get_current_epoch_target_attestation_block(:operational_address)
     }
 }
 
@@ -539,7 +635,7 @@ pub(crate) struct SystemState<TTokenState> {
     pub minting_curve: MintingCurveState,
     pub reward_supplier: RewardSupplierState,
     pub pool: Option<PoolState>,
-    attestation: Option<AttestationState>,
+    pub(crate) attestation: Option<AttestationState>,
     pub base_account: felt252,
     staker_address: Option<ContractAddress>,
 }
@@ -746,7 +842,7 @@ pub(crate) impl SystemImpl<
                 );
     }
 
-    fn set_staker_for_conversion(
+    fn set_staker_for_migration(
         ref self: SystemState<TTokenState>, staker_address: ContractAddress,
     ) {
         self.staker_address = Option::Some(staker_address);
@@ -880,12 +976,16 @@ pub(crate) impl SystemStakerImpl<
         self.staking.dispatcher().update_commission(:commission)
     }
 
-    fn staker_info(self: SystemState<TTokenState>, staker: Staker) -> StakerInfo {
-        self.staking.dispatcher().staker_info(staker_address: staker.staker.address)
+    fn staker_info_v1(self: SystemState<TTokenState>, staker: Staker) -> StakerInfoV1 {
+        self.staking.dispatcher().staker_info_v1(staker_address: staker.staker.address)
     }
 
-    fn get_staker_info(self: SystemState<TTokenState>, staker: Staker) -> Option<StakerInfo> {
-        self.staking.dispatcher().get_staker_info(staker_address: staker.staker.address)
+    fn staker_info(self: SystemState<TTokenState>, staker: Staker) -> StakerInfo {
+        self.staking.dispatcher_v0().staker_info(staker_address: staker.staker.address)
+    }
+
+    fn get_staker_info(self: SystemState<TTokenState>, staker: Staker) -> Option<StakerInfoV1> {
+        self.staking.dispatcher().get_staker_info_v1(staker_address: staker.staker.address)
     }
 
     fn internal_staker_info(
@@ -897,10 +997,8 @@ pub(crate) impl SystemStakerImpl<
             .internal_staker_info(staker_address: staker.staker.address)
     }
 
-    fn convert_internal_staker_info(
-        self: SystemState<TTokenState>, staker_address: ContractAddress,
-    ) -> InternalStakerInfoLatest {
-        self.staking.migration_dispatcher().convert_internal_staker_info(:staker_address)
+    fn staker_migration(self: SystemState<TTokenState>, staker_address: ContractAddress) {
+        self.staking.migration_dispatcher().staker_migration(:staker_address)
     }
 
     fn attest(self: SystemState<TTokenState>, staker: Staker) {
@@ -918,10 +1016,10 @@ pub(crate) impl SystemStakerImpl<
     }
 
     fn staker_total_amount(self: SystemState<TTokenState>, staker: Staker) -> Amount {
-        let staker_info = self.staker_info(:staker);
+        let staker_info = self.staker_info_v1(:staker);
         let mut total = staker_info.amount_own;
         if let Option::Some(pool_info) = staker_info.pool_info {
-            total += pool_info._deprecated_amount();
+            total += pool_info.amount;
         }
         total
     }
@@ -933,16 +1031,6 @@ pub(crate) impl SystemStakerImpl<
             contract_address: self.staking.address, caller_address: staker.staker.address,
         );
         self.staking.dispatcher().change_reward_address(:reward_address)
-    }
-
-    /// Ensures the global index is up-to-date by invoking `change_reward_address`.
-    /// **Note**: In version 0 of the staking contract, the `change_reward_address` function also
-    /// triggers an update of the global index if needed. Call that fucntion before upgrading the
-    /// staking contract in order to update global index.
-    fn update_global_index_via_change_reward_address(
-        self: SystemState<TTokenState>, staker: Staker,
-    ) {
-        self.change_reward_address(:staker, reward_address: staker.reward.address)
     }
 
     #[feature("safe_dispatcher")]
@@ -1005,6 +1093,14 @@ pub(crate) impl SystemDelegatorImpl<
         );
         let pool_dispatcher = IPoolDispatcher { contract_address: pool };
         pool_dispatcher.exit_delegation_pool_intent(:amount)
+    }
+
+    #[feature("safe_dispatcher")]
+    fn safe_delegator_exit_intent(
+        self: SystemState<TTokenState>, delegator: Delegator, pool: ContractAddress, amount: Amount,
+    ) -> Result<(), Array<felt252>> {
+        let safe_pool_dispatcher = IPoolSafeDispatcher { contract_address: pool };
+        safe_pool_dispatcher.exit_delegation_pool_intent(:amount)
     }
 
     fn delegator_exit_action(
@@ -1077,15 +1173,22 @@ pub(crate) impl SystemDelegatorImpl<
     fn pool_member_info(
         self: SystemState<TTokenState>, delegator: Delegator, pool: ContractAddress,
     ) -> PoolMemberInfo {
-        let pool_dispatcher = IPoolDispatcher { contract_address: pool };
+        let pool_dispatcher = IPoolV0Dispatcher { contract_address: pool };
         pool_dispatcher.pool_member_info(pool_member: delegator.delegator.address)
     }
 
     fn get_pool_member_info(
         self: SystemState<TTokenState>, delegator: Delegator, pool: ContractAddress,
     ) -> Option<PoolMemberInfo> {
-        let pool_dispatcher = IPoolDispatcher { contract_address: pool };
+        let pool_dispatcher = IPoolV0Dispatcher { contract_address: pool };
         pool_dispatcher.get_pool_member_info(pool_member: delegator.delegator.address)
+    }
+
+    fn pool_member_info_v1(
+        self: SystemState<TTokenState>, delegator: Delegator, pool: ContractAddress,
+    ) -> PoolMemberInfoV1 {
+        let pool_dispatcher = IPoolDispatcher { contract_address: pool };
+        pool_dispatcher.pool_member_info_v1(pool_member: delegator.delegator.address)
     }
 
     fn internal_pool_member_info(
@@ -1109,11 +1212,11 @@ pub(crate) impl SystemDelegatorImpl<
 pub(crate) impl SystemPoolImpl<
     TTokenState, +TokenTrait<TTokenState>, +Drop<TTokenState>, +Copy<TTokenState>,
 > of SystemPoolTrait<TTokenState> {
-    fn contract_parameters(
+    fn contract_parameters_v1(
         self: SystemState<TTokenState>, pool: ContractAddress,
-    ) -> PoolContractInfo {
+    ) -> PoolContractInfoV1 {
         let pool_dispatcher = IPoolDispatcher { contract_address: pool };
-        pool_dispatcher.contract_parameters()
+        pool_dispatcher.contract_parameters_v1()
     }
 }
 
@@ -1157,12 +1260,18 @@ impl STRKTTokenImpl of TokenTrait<STRKTokenState> {
 #[generate_trait]
 /// Replaceability utils for internal use of the system. Meant to be used before running a
 /// regression test.
-impl SystemReplaceabilityImpl of SystemReplaceabilityTrait {
+pub(crate) impl SystemReplaceabilityImpl of SystemReplaceabilityTrait {
     /// Deploy attestation contract and upgrades the contracts in the system state with local
     /// implementations.
     fn deploy_attestation_and_upgrade_contracts_implementation(
         ref self: SystemState<STRKTokenState>,
     ) {
+        self.deploy_attestation();
+        self.upgrade_contracts_implementation();
+    }
+
+    /// Deploy attestation contract.
+    fn deploy_attestation(ref self: SystemState<STRKTokenState>) {
         let cfg: StakingInitConfig = Default::default();
         let attestation_config = AttestationConfig {
             governance_admin: cfg.test_info.governance_admin,
@@ -1170,12 +1279,11 @@ impl SystemReplaceabilityImpl of SystemReplaceabilityTrait {
         };
         let attestation_state = attestation_config.deploy(staking: self.staking);
         self.attestation = Option::Some(attestation_state);
-
-        self.upgrade_contracts_implementation();
     }
 
     /// Upgrades the contracts in the system state with local implementations.
     fn upgrade_contracts_implementation(self: SystemState<STRKTokenState>) {
+        self.staking.pause();
         self.upgrade_staking_implementation();
         self.upgrade_reward_supplier_implementation();
         self.upgrade_minting_curve_implementation();
@@ -1183,8 +1291,9 @@ impl SystemReplaceabilityImpl of SystemReplaceabilityTrait {
             self.upgrade_pool_implementation(:pool);
         }
         if let Option::Some(staker_address) = self.staker_address {
-            self.convert_internal_staker_info(staker_address);
+            self.staker_migration(staker_address);
         }
+        self.staking.unpause();
     }
 
     /// Upgrades the staking contract in the system state with a local implementation.
@@ -1279,7 +1388,7 @@ pub(crate) fn upgrade_implementation(
 
 #[generate_trait]
 /// System factory for creating system states used in flow and regression tests.
-impl SystemFactoryImpl of SystemFactoryTrait {
+pub(crate) impl SystemFactoryImpl of SystemFactoryTrait {
     // System state used for flow tests.
     fn local_system() -> SystemState<TokenState> {
         let cfg: StakingInitConfig = Default::default();
@@ -1324,11 +1433,11 @@ pub(crate) fn test_flow_mainnet<
     let mut system = SystemFactoryTrait::mainnet_system();
     flow.setup(ref :system);
     if let Option::Some(pool_address) = flow.get_pool_address() {
-        // Pool upgrade handles the conversion of internal staker info.
+        // Pool upgrade handles the migration of internal staker info.
         system.set_pool_for_upgrade(pool_address);
     } else if let Option::Some(staker_address) = flow.get_staker_address() {
-        // Need to convert internal staker info only if there is no pool to upgrade.
-        system.set_staker_for_conversion(staker_address);
+        // Need to migrate internal staker info only if there is no pool to upgrade.
+        system.set_staker_for_migration(staker_address);
     }
     system.deploy_attestation_and_upgrade_contracts_implementation();
     flow.test(ref :system, system_type: SystemType::Mainnet);
